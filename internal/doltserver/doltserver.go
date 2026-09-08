@@ -316,8 +316,9 @@ func DefaultConfig(townRoot string) *Config {
 	// environment, daemon/daemon.env keeps the setting durable across restarts.
 	// A bad value is ignored with a diagnostic so a malformed override cannot
 	// prevent the server from starting or silently disable its guard.
-	config.ReadTimeoutMs = resolveListenerTimeoutMs(townRoot, "GT_DOLT_READ_TIMEOUT_MS", DefaultReadTimeoutMs)
-	config.WriteTimeoutMs = resolveListenerTimeoutMs(townRoot, "GT_DOLT_WRITE_TIMEOUT_MS", DefaultWriteTimeoutMs)
+	timeouts := ResolveListenerTimeouts(townRoot, DefaultReadTimeoutMs, DefaultWriteTimeoutMs)
+	config.ReadTimeoutMs = timeouts.ReadMs
+	config.WriteTimeoutMs = timeouts.WriteMs
 
 	// Optional override for the idle-session timeout. Negative values disable
 	// the override entirely (use Dolt's 8-hour default).
@@ -1665,14 +1666,7 @@ func writeServerConfig(config *Config, configPath string) error {
 	}
 
 	// Build timeout entries. Omit when 0 to use Dolt's defaults (not recommended).
-	readTimeoutLine := ""
-	if config.ReadTimeoutMs > 0 {
-		readTimeoutLine = fmt.Sprintf("\n  read_timeout_millis: %d", config.ReadTimeoutMs)
-	}
-	writeTimeoutLine := ""
-	if config.WriteTimeoutMs > 0 {
-		writeTimeoutLine = fmt.Sprintf("\n  write_timeout_millis: %d", config.WriteTimeoutMs)
-	}
+	timeouts := ListenerTimeouts{ReadMs: config.ReadTimeoutMs, WriteMs: config.WriteTimeoutMs}
 
 	maxConnLine := ""
 	if config.MaxConnections > 0 {
@@ -1712,7 +1706,7 @@ func writeServerConfig(config *Config, configPath string) error {
 log_level: %s
 
 listener:
-  port: %d%s%s%s%s
+  port: %d%s%s%s
 
 data_dir: "%s"
 
@@ -1723,8 +1717,7 @@ behavior:
 		config.Port,
 		hostLine,
 		maxConnLine,
-		readTimeoutLine,
-		writeTimeoutLine,
+		timeouts.YAML(),
 		filepath.ToSlash(config.DataDir),
 		eventSchedulerLine,
 		autoGcBlock,

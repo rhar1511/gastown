@@ -216,3 +216,51 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	return string(data)
 }
+
+func TestDefaultConfig_ListenerTimeoutGeneratedYAML(t *testing.T) {
+	for _, tt := range []struct {
+		name, read, write   string
+		wantRead, wantWrite int
+	}{
+		{name: "defaults", wantRead: 300000, wantWrite: 300000},
+		{name: "process precedence", read: "28800000", write: "900000", wantRead: 28800000, wantWrite: 900000},
+		{name: "write zero", read: "900000", write: "0", wantRead: 900000},
+		{name: "duration boundary", read: "9223372036854", write: "9223372036854", wantRead: 9223372036854, wantWrite: 9223372036854},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			t.Setenv("GT_DOLT_READ_TIMEOUT_MS", tt.read)
+			t.Setenv("GT_DOLT_WRITE_TIMEOUT_MS", tt.write)
+			if tt.name == "process precedence" {
+				writeDaemonEnv(t, townRoot, "GT_DOLT_READ_TIMEOUT_MS=111\nGT_DOLT_WRITE_TIMEOUT_MS=222\n")
+			}
+			configPath := filepath.Join(townRoot, "config.yaml")
+			if err := writeServerConfig(DefaultConfig(townRoot), configPath); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Listener struct {
+					Read  *int `yaml:"read_timeout_millis"`
+					Write *int `yaml:"write_timeout_millis"`
+				} `yaml:"listener"`
+			}
+			if err := yaml.Unmarshal(data, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Listener.Read == nil || *parsed.Listener.Read != tt.wantRead {
+				t.Errorf("read timeout = %v, want %d", parsed.Listener.Read, tt.wantRead)
+			}
+			if tt.wantWrite == 0 {
+				if parsed.Listener.Write != nil {
+					t.Errorf("write timeout should be omitted, got %d", *parsed.Listener.Write)
+				}
+			} else if parsed.Listener.Write == nil || *parsed.Listener.Write != tt.wantWrite {
+				t.Errorf("write timeout = %v, want %d", parsed.Listener.Write, tt.wantWrite)
+			}
+		})
+	}
+}

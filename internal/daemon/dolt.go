@@ -847,7 +847,8 @@ func IsDoltUnhealthy(townRoot string) bool {
 // daemon's DoltServerConfig. Unlike CLI flags, config.yaml can set
 // read_timeout_millis and write_timeout_millis, which prevents CLOSE_WAIT
 // accumulation when clients disconnect without completing their SQL sessions.
-func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
+func writeDaemonDoltConfig(townRoot string, cfg *DoltServerConfig, configPath string) error {
+	timeouts := doltserver.ResolveListenerTimeouts(townRoot, 30000, 30000)
 	hostLine := ""
 	if cfg.Host != "" {
 		hostLine = fmt.Sprintf("\n  host: %s", cfg.Host)
@@ -883,9 +884,7 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
 log_level: info
 
 listener:
-  port: %d%s
-  read_timeout_millis: 30000
-  write_timeout_millis: 30000
+  port: %d%s%s
   max_connections: 1000
 
 data_dir: %q
@@ -895,6 +894,7 @@ behavior:
 %s%s%s`,
 		cfg.Port,
 		hostLine,
+		timeouts.YAML(),
 		cfg.DataDir,
 		eventSchedulerLine,
 		autoGcBlock,
@@ -940,7 +940,7 @@ func (m *DoltServerManager) startLocked() error {
 	// use --config instead. This prevents CLOSE_WAIT accumulation that occurs
 	// when Dolt uses its 8-hour default read/write timeouts. (gt-ch5)
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
-	if err := writeDaemonDoltConfig(m.config, configPath); err != nil {
+	if err := writeDaemonDoltConfig(m.townRoot, m.config, configPath); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 
