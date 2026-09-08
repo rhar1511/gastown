@@ -845,8 +845,8 @@ func IsDoltUnhealthy(townRoot string) bool {
 
 // writeDaemonDoltConfig writes a Dolt config.yaml to configPath using the
 // daemon's DoltServerConfig. Unlike CLI flags, config.yaml can set
-// read_timeout_millis and write_timeout_millis, which prevents CLOSE_WAIT
-// accumulation when clients disconnect without completing their SQL sessions.
+// listener timeouts. Their defaults guard against CLOSE_WAIT accumulation;
+// operator overrides are resolved by doltserver.ResolveListenerTimeouts.
 func writeDaemonDoltConfig(townRoot string, cfg *DoltServerConfig, configPath string) error {
 	timeouts := doltserver.ResolveListenerTimeouts(townRoot, 30000, 30000)
 	hostLine := ""
@@ -937,8 +937,7 @@ func (m *DoltServerManager) startLocked() error {
 
 	// Write config.yaml with timeouts before starting. CLI flags like --port
 	// silently override the config file but cannot set timeout fields, so we
-	// use --config instead. This prevents CLOSE_WAIT accumulation that occurs
-	// when Dolt uses its 8-hour default read/write timeouts. (gt-ch5)
+	// use --config instead. See writeDaemonDoltConfig for the timeout policy.
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
 	if err := writeDaemonDoltConfig(m.townRoot, m.config, configPath); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)

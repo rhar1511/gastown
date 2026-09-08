@@ -225,8 +225,7 @@ type Config struct {
 	PidFile string
 
 	// MaxConnections is the maximum number of simultaneous connections the server will accept.
-	// Set to 0 to use the Dolt default (1000). Gas Town defaults to 50 to prevent
-	// connection storms during mass polecat slings.
+	// Set to 0 to use the Dolt default. See DefaultMaxConnections for Gas Town's default.
 	MaxConnections int
 
 	// ReadTimeoutMs is the server-side read timeout in milliseconds.
@@ -1928,8 +1927,8 @@ func Start(townRoot string) error {
 	}
 
 	// Always write a managed config.yaml from the Config struct before starting.
-	// This ensures critical settings (especially read/write timeouts) are always
-	// present, preventing CLOSE_WAIT accumulation from abandoned connections.
+	// This reapplies listener overrides on every start, including omission for zero
+	// values. The default limits guard against abandoned CLOSE_WAIT connections.
 	// The config file uses --config so all settings come from this file; CLI flags
 	// are ignored by dolt when --config is used.
 	configPath := filepath.Join(config.DataDir, "config.yaml")
