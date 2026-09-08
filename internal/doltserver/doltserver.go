@@ -158,6 +158,10 @@ const (
 	// for Dolt's default 8 hours. Set to match compactor GC timeout.
 	DefaultWriteTimeoutMs = 5 * 60 * 1000 // 5 minutes in milliseconds
 
+	// maxDoltListenerTimeoutMs is the largest millisecond value Dolt can safely
+	// convert to time.Duration without overflowing nanoseconds.
+	maxDoltListenerTimeoutMs int64 = (1<<63 - 1) / int64(time.Millisecond)
+
 	// DefaultWaitTimeoutSec is how long Dolt keeps an idle session alive before
 	// closing it. Dolt's MySQL-compat default is 28800s (8 hours). Under Gas
 	// Town load (mayor + deacon + witness + refinery + N polecats + dashboard
@@ -285,6 +289,8 @@ type Config struct {
 //   - GT_DOLT_USER → User
 //   - GT_DOLT_PASSWORD → Password
 //   - GT_DOLT_LOGLEVEL → LogLevel (trace, debug, info, warning, error, fatal)
+//   - GT_DOLT_READ_TIMEOUT_MS → ReadTimeoutMs (nonnegative milliseconds)
+//   - GT_DOLT_WRITE_TIMEOUT_MS → WriteTimeoutMs (nonnegative milliseconds)
 func DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
@@ -304,6 +310,14 @@ func DefaultConfig(townRoot string) *Config {
 		DoltStatsEnabled: "0",
 		AutoGC:           "on",
 	}
+
+	// Listener timeouts are read from the process environment first. When the
+	// daemon starts `gt dolt` without inheriting the operator's shell
+	// environment, daemon/daemon.env keeps the setting durable across restarts.
+	// A bad value is ignored with a diagnostic so a malformed override cannot
+	// prevent the server from starting or silently disable its guard.
+	config.ReadTimeoutMs = resolveListenerTimeoutMs(townRoot, "GT_DOLT_READ_TIMEOUT_MS", DefaultReadTimeoutMs)
+	config.WriteTimeoutMs = resolveListenerTimeoutMs(townRoot, "GT_DOLT_WRITE_TIMEOUT_MS", DefaultWriteTimeoutMs)
 
 	// Optional override for the idle-session timeout. Negative values disable
 	// the override entirely (use Dolt's 8-hour default).
@@ -384,6 +398,46 @@ func readDaemonEnvVar(path, key string) string {
 		}
 	}
 	return ""
+}
+
+// resolveListenerTimeoutMs resolves a nonnegative listener timeout in
+// milliseconds. A nonempty process environment value takes precedence over
+// daemon/daemon.env; an absent value falls back to that durable file. Zero is
+// valid and means the generated Dolt config omits the field, allowing Dolt's
+// own default. Invalid, negative, and out-of-range values use defaultValue.
+func resolveListenerTimeoutMs(townRoot, key string, defaultValue int) int {
+	value, ok := os.LookupEnv(key)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		ok = false
+	}
+	if !ok {
+		if townRoot != "" {
+			value = strings.TrimSpace(readDaemonEnvVar(filepath.Join(townRoot, "daemon", "daemon.env"), key))
+			ok = value != ""
+		}
+	}
+	if !ok {
+		return defaultValue
+	}
+
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err == nil && parsed >= 0 && parsed <= maxDoltListenerTimeoutMs && parsed <= int64(^uint(0)>>1) {
+		return int(parsed)
+	}
+	if err == nil {
+		if parsed > maxDoltListenerTimeoutMs {
+			err = fmt.Errorf("must fit in Dolt's time.Duration when expressed in milliseconds")
+		} else if parsed > int64(^uint(0)>>1) {
+			err = fmt.Errorf("must fit in an int")
+		} else {
+			err = fmt.Errorf("must be nonnegative")
+		}
+	} else if parsed < 0 {
+		err = fmt.Errorf("must be nonnegative")
+	}
+	fmt.Fprintf(os.Stderr, "Warning: invalid %s=%q (%v); using default %d ms\n", key, value, err, defaultValue)
+	return defaultValue
 }
 
 // IsRemote returns true when the config points to a non-local Dolt server.
@@ -1651,6 +1705,7 @@ func writeServerConfig(config *Config, configPath string) error {
 # Do not edit manually; changes are overwritten on each server start.
 # To customize, set Gas Town environment variables:
 #   GT_DOLT_PORT, GT_DOLT_HOST, GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
+#   GT_DOLT_READ_TIMEOUT_MS, GT_DOLT_WRITE_TIMEOUT_MS (nonnegative milliseconds)
 #   GT_DOLT_EVENT_SCHEDULER (OFF, ON, omit), GT_DOLT_STATS_ENABLED (0, 1, omit)
 #   GT_DOLT_AUTO_GC (on, off)
 
