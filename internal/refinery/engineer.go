@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -166,8 +167,9 @@ type MergeQueueConfig struct {
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
 	// VCSProvider selects the VCS platform for PR operations when
-	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
-	VCSProvider string `json:"vcs_provider,omitempty"`
+	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket", "forgejo".
+	VCSProvider string                `json:"vcs_provider,omitempty"`
+	Forgejo     *config.ForgejoConfig `json:"forgejo,omitempty"`
 
 	// RequireReview controls whether the refinery requires at least one approving
 	// review before merging a PR. Only meaningful when MergeStrategy="pr".
@@ -357,6 +359,7 @@ func (e *Engineer) LoadConfig() error {
 		AutoPush             *bool                     `json:"auto_push"`
 		MergeStrategy        *string                   `json:"merge_strategy"`
 		VCSProvider          *string                   `json:"vcs_provider"`
+		Forgejo              *config.ForgejoConfig     `json:"forgejo"`
 		RequireReview        *bool                     `json:"require_review"`
 	}
 
@@ -446,6 +449,10 @@ func (e *Engineer) LoadConfig() error {
 		e.config.RequireReview = mqRaw.RequireReview
 	}
 
+	e.config.Forgejo = mqRaw.Forgejo
+	if e.config.VCSProvider == "forgejo" && e.config.MergeStrategy != "pr" {
+		return fmt.Errorf("forgejo requires merge_strategy=pr; direct delivery is forbidden")
+	}
 	// Initialize the PR provider when merge_strategy=pr.
 	if e.config.MergeStrategy == "pr" {
 		if err := e.initPRProvider(); err != nil {
@@ -462,6 +469,19 @@ func (e *Engineer) initPRProvider() error {
 	switch e.config.VCSProvider {
 	case "", "github":
 		e.prProvider = newGitHubPRProvider(e.git)
+	case "forgejo":
+		if len(e.config.Gates) > 0 || (e.config.RunTests && e.config.TestCommand != "") {
+			return fmt.Errorf("forgejo server-side gates cannot silently replace configured local gate commands")
+		}
+		if e.config.MaxConcurrent != 1 {
+			return fmt.Errorf("forgejo requires max_concurrent=1")
+		}
+		p, err := newForgejoPRProvider(e.git, e.config.Forgejo)
+		if err != nil {
+			return err
+		}
+		p.lockPath = filepath.Join(e.rig.Path, ".runtime", "forgejo-provider.lock")
+		e.prProvider = p
 	case "bitbucket":
 		p, err := newBitbucketPRProvider(e.git)
 		if err != nil {
@@ -469,7 +489,7 @@ func (e *Engineer) initPRProvider() error {
 		}
 		e.prProvider = p
 	default:
-		return fmt.Errorf("unknown vcs_provider %q (supported: github, bitbucket)", e.config.VCSProvider)
+		return fmt.Errorf("unknown vcs_provider %q (supported: github, bitbucket, forgejo)", e.config.VCSProvider)
 	}
 	return nil
 }
@@ -514,6 +534,27 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return eligibility
 	}
 
+	// Forgejo validates the submitted remote head with required server-side CI.
+	// Never run the local path's origin pulls or submodule pushes for this provider.
+	if e.config.VCSProvider == "forgejo" {
+		if e.config.MergeStrategy != "pr" {
+			return ProcessResult{Error: "forgejo requires merge_strategy=pr"}
+		}
+		if !e.isSyntheticMergeMechanicsMR(mr) {
+			fresh, err := e.CheckForgejoMR(mr.ID)
+			if err != nil {
+				return ProcessResult{Error: err.Error()}
+			}
+			worker := os.Getenv("GT_REFINERY_WORKER")
+			if worker == "" {
+				worker = "refinery-1"
+			}
+			if fresh.Assignee != worker || fresh.CommitSHA != mr.CommitSHA || fresh.Branch != mr.Branch || fresh.Target != mr.Target {
+				return ProcessResult{Error: "Forgejo MR claim or submitted identity changed"}
+			}
+		}
+		return e.doMergePR(ctx, mr)
+	}
 	// Step 1: Verify source branch exists locally (shared .repo.git with polecats)
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking local branch %s...\n", branch)
 	exists, err := e.git.BranchExists(branch)
@@ -790,6 +831,15 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 			Error:   fmt.Sprintf("no PR provider configured for vcs_provider=%s", provider),
 		}
 	}
+	if provider == "forgejo" {
+		p, ok := e.prProvider.(*forgejoPRProvider)
+		if !ok || p.cfg.TargetBranch != target {
+			return ProcessResult{Error: "forgejo target/provider mismatch"}
+		}
+		if !forgejoSHA.MatchString(mr.CommitSHA) {
+			return ProcessResult{Error: "forgejo requires full submitted commit_sha"}
+		}
+	}
 	// Step PR.1: Find the PR for this branch
 	pr, err := e.prProvider.FindPullRequest(branch, mr.PRURL, mr.PRNumber, mr.CommitSHA)
 	if err != nil {
@@ -851,10 +901,14 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
 
-	// Step PR.3: Merge via VCS provider API with a merge commit so the submitted
-	// head remains in target ancestry for post-merge proof.
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Merging PR #%d via %s API (merge)...\n", pr.Number, provider)
-	mergeCommit, err := e.prProvider.MergePR(pr, "merge")
+	// Step PR.3: Preserve GitHub merge-commit behavior; Forgejo uses an
+	// exact-head squash receipt and canonical-remote proof instead of source ancestry.
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Merging PR #%d via %s protected API...\n", pr.Number, provider)
+	method := "merge"
+	if provider == "forgejo" {
+		method = "squash"
+	}
+	mergeCommit, err := e.prProvider.MergePR(pr, method)
 	if err != nil {
 		return ProcessResult{
 			Success: false,
@@ -862,6 +916,11 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 		}
 	}
 
+	// Forgejo already verified the authoritative squash receipt and reachability
+	// on its configured remote. Do not infer success from local HEAD or origin.
+	if provider == "forgejo" {
+		return ProcessResult{Success: true, MergeCommit: mergeCommit}
+	}
 	// Step PR.4: Sync local target branch after remote merge
 	if err := e.git.Checkout(target); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to checkout %s after PR merge: %v\n", target, err)
@@ -1368,7 +1427,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Released merge slot\n")
 	}
-	if err := e.verifyMRInfoPostMergeProof(mr); err != nil {
+	if err := e.verifyMRInfoPostMergeProof(mr, result.MergeCommit); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Post-merge proof failed for %s: %v\n", mr.ID, err)
 		return false
 	}
@@ -1400,7 +1459,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// work branches that should never persist after merge. Other branches
 	// respect the DeleteMergedBranches config.
 	isPolecat := strings.HasPrefix(mr.Branch, "polecat/")
-	if mr.Branch != "" && (e.config.DeleteMergedBranches || isPolecat) {
+	if e.config.VCSProvider != "forgejo" && mr.Branch != "" && (e.config.DeleteMergedBranches || isPolecat) {
 		// Remote delete — only polecat branches. Non-polecat branches may belong
 		// to contributor forks with open upstream PRs; deleting them from origin
 		// causes GitHub to auto-close those PRs via head_ref_delete. (GH#2669)
@@ -1432,7 +1491,11 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// 3. Check and auto-close completed convoys
 	// After closing a source issue, its parent convoy may now be complete.
 	// Run convoy check to auto-close and notify subscribers.
-	e.postMergeConvoyCheck(mr)
+	if e.config.VCSProvider == "forgejo" {
+		e.notifyDeaconConvoyFeeding(mr)
+	} else {
+		e.postMergeConvoyCheck(mr)
+	}
 
 	// 4. Nudge mayor about successful merge so dispatcher can unblock
 	// dependent work. Without this, mayor only discovers completion by polling.
@@ -1535,7 +1598,7 @@ func requirePullRequestHead(pr *git.PullRequestInfo, expectedHead string) error 
 	return nil
 }
 
-func (e *Engineer) verifyMRInfoPostMergeProof(mr *MRInfo) error {
+func (e *Engineer) verifyMRInfoPostMergeProof(mr *MRInfo, mergeCommits ...string) error {
 	if mr == nil {
 		return fmt.Errorf("merge request is missing")
 	}
@@ -1552,6 +1615,24 @@ func (e *Engineer) verifyMRInfoPostMergeProof(mr *MRInfo) error {
 	commit := strings.TrimSpace(mr.CommitSHA)
 	if commit == "" {
 		return fmt.Errorf("missing submitted commit_sha")
+	}
+	if e.config.VCSProvider == "forgejo" {
+		p, ok := e.prProvider.(*forgejoPRProvider)
+		if !ok || target != p.cfg.TargetBranch {
+			return fmt.Errorf("forgejo target/provider mismatch")
+		}
+		n, err := p.prNumber(mr.PRURL, mr.PRNumber)
+		if err != nil {
+			return err
+		}
+		actual, err := p.verifyMerged(n, commit)
+		if err != nil {
+			return err
+		}
+		if len(mergeCommits) > 0 && mergeCommits[0] != actual {
+			return fmt.Errorf("forgejo merge receipt changed")
+		}
+		return nil
 	}
 	if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
 		return fmt.Errorf("target %s does not contain submitted head %s: %w", target, commit, err)

@@ -2,6 +2,17 @@
 
 > **Recovery**: Run `{{ cmd }} prime` after compaction, clear, or new session
 
+## Forgejo delivery override
+
+Before branch processing, read the rig's `config.json`. When
+`merge_queue.vcs_provider` is `forgejo`, follow
+`docs/forgejo-refinery.md` in the Gas Town source checkout. Its protected
+`{{ cmd }} refinery check-pr` / `{{ cmd }} refinery land` path replaces the local
+rebase, GitHub, raw-push and legacy post-merge steps below. Use one admitted MR
+at a time, oldest-first among PRs with successful preflight. Preserve refused
+MRs for repair; send completion only after verified landing. If the command or
+accepted controller handoff is unavailable, report the blocker and retain work.
+
 ## ⚡ Theory of Operation: The Propulsion Principle
 
 Gas Town is a steam engine. You are the gearbox.

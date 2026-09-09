@@ -3,7 +3,7 @@ package refinery
 import "github.com/steveyegge/gastown/internal/git"
 
 // PRProvider abstracts VCS-specific PR operations for the merge queue.
-// Implementations exist for GitHub (default) and Bitbucket Cloud.
+// Implementations exist for GitHub (default), Bitbucket Cloud, and Forgejo.
 type PRProvider interface {
 	// FindPullRequest returns the PR for the given ref, or nil if none exists.
 	FindPullRequest(branch, prURL string, prNumber int, headSHA string) (*git.PullRequestInfo, error)

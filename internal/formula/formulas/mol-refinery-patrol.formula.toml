@@ -1,6 +1,14 @@
 description = """
 Merge queue processor patrol loop.
 
+FORGEJO OVERRIDE: Read the rig config before branch processing. If
+merge_queue.vcs_provider=forgejo, use docs/forgejo-refinery.md from the Gas Town
+source checkout. Process existing admitted MRs oldest-first among successful
+preflights using gt refinery check-pr, explicit claim, then gt refinery land.
+That path replaces every local rebase, GitHub merge, raw Git push and legacy
+post-merge step in this formula. Preserve refused work; only a verified land
+receipt permits completion. Never fall back when the provider is unavailable.
+
 The Refinery is the Engineer in the engine room. You process polecat branches, merging them to their effective target branches one at a time without rewriting submitted heads.
 
 **The Scotty Test**: Before proceeding past any failure, ask yourself: "Would Scotty walk past a warp core leak because it existed before his shift?"
@@ -677,7 +685,11 @@ Continue to Step 2.
 - Debug the push failure (check `git push` output, network, auth)
 - Retry push and verify again before proceeding
 
-**If merge_strategy = "pr":**
+**If merge_strategy = "pr" and vcs_provider = "forgejo":**
+Use the Forgejo override above; `gt refinery land` owns merge and receipt-based
+closure. Skip the GitHub path and the legacy ancestry-based post-merge command.
+
+**If merge_strategy = "pr" and vcs_provider = "github" (default):**
 
 Create a GitHub PR for the submitted branch instead of direct merge. Do not
 force-push or rebase the polecat branch; post-merge proof depends on the
@@ -829,7 +841,11 @@ Issue: <issue-id>
 Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-**If merge_strategy = "pr":**
+**If merge_strategy = "pr" and vcs_provider = "forgejo":**
+Use the Forgejo override above; `gt refinery land` owns merge and receipt-based
+closure. Skip the GitHub path and the legacy ancestry-based post-merge command.
+
+**If merge_strategy = "pr" and vcs_provider = "github" (default):**
 ```bash
 gt mail send <rig>/witness -s "MERGED <polecat-name>" -m "Branch: <branch>
 Issue: <issue-id>

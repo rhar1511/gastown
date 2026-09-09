@@ -13,6 +13,21 @@ import (
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
+// ForgejoConfig binds protected PR delivery to one canonical repository and identity.
+// Credentials are read from TokenEnv, never serialized into configuration.
+type ForgejoConfig struct {
+	Remote          string `json:"remote"`
+	BaseURL         string `json:"base_url"`
+	TargetBranch    string `json:"target_branch"`
+	TokenEnv        string `json:"token_env"`
+	FreezeTokenEnv  string `json:"freeze_token_env,omitempty"`
+	ControllerUser  string `json:"controller_user"`
+	BasicAuth       bool   `json:"basic_auth,omitempty"`
+	AllowHTTP       bool   `json:"allow_http,omitempty"`
+	ServerSideGates bool   `json:"server_side_gates"`
+	LandingEnabled  bool   `json:"landing_enabled,omitempty"`
+}
+
 // TownConfig represents the main town identity (mayor/town.json).
 type TownConfig struct {
 	Type       string    `json:"type"`                  // "town"
@@ -1343,8 +1358,10 @@ type MergeQueueConfig struct {
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
 	// VCSProvider selects the VCS platform for PR operations when
-	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
+	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket", "forgejo".
 	VCSProvider string `json:"vcs_provider,omitempty"`
+
+	Forgejo *ForgejoConfig `json:"forgejo,omitempty"`
 
 	// RequireReview controls whether the refinery requires at least one approving
 	// review before merging a PR. Only meaningful when merge_strategy="pr".
